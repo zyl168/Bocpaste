@@ -15,6 +15,7 @@ history/
 # Local temp/scratch files
 _*.py
 _*.png
+_*.tar
 
 # IDE / tools
 .claude/

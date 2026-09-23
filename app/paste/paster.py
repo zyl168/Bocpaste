@@ -282,12 +282,10 @@ class Paster(QWidget):
         self.setGeometry(rect)
         self.update()
 
-    def mouseDoubleClickEvent(self, e):
-        if e.button() == Qt.LeftButton:
-            if QApplication.keyboardModifiers() & Qt.ShiftModifier:
-                self.set_click_through(False)
-            else:
-                self.set_click_through(not self._through)
+    # NOTE: no double-click handler on purpose. Click-through is toggled from
+    # the context menu only — a pierced window never receives mouse events,
+    # so double-click would be a one-way trap with no mouse-way back.
+    # Recovery paths while pierced: tray menu "取消所有鼠标穿透".
 
     def wheelEvent(self, e):
         delta = e.angleDelta().y()
