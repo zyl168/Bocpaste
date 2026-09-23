@@ -530,8 +530,13 @@ class Snipper(QWidget):
         editor.rejected.connect(self._text_rejected)
         self._editor = editor
         self._editing = True
-        # belt & braces: grab focus once the event loop settles
-        QTimer.singleShot(0, editor.setFocus)
+        # belt & braces: grab focus once the event loop settles (guard against
+        # the editor being closed before the timer fires)
+        QTimer.singleShot(0, self._focus_editor)
+
+    def _focus_editor(self):
+        if self._editor is not None:
+            self._editor.setFocus()
 
     def _text_accepted(self, text):
         editor = self._editor

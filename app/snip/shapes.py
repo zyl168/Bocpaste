@@ -135,15 +135,13 @@ class ArrowShape(_TwoPoint):
     def _head_size(self) -> float:
         return max(9.0, float(self.width) * 4.0 + 5)
 
-    def _shaft_end(self) -> tuple[QPointF, float]:
-        """Return (tip_point, angle) — tip is the arrowhead apex at self.b;
-        the shaft line stops `head_size` before self.b so the line doesn't
+    def _shaft_end(self) -> tuple[QPointF, float, float]:
+        """Return (tip_point, angle, length) — tip is the arrowhead apex at
+        self.b; the shaft line stops short of the apex so the line doesn't
         poke past the arrowhead."""
         dx = self.b.x() - self.a.x()
         dy = self.b.y() - self.a.y()
         length = math.hypot(dx, dy)
-        if length < 1e-6:
-            return QPointF(self.b), 0.0
         angle = math.atan2(dy, dx)
         return QPointF(self.b), angle, length
 

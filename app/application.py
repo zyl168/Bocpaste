@@ -62,6 +62,10 @@ class AppController(QObject):
         self.snipper.start_snip()
 
     def _snipper_closed(self):
+        if self.snipper is not None:
+            # deterministic teardown: a hidden Qt.Tool overlay must not linger
+            # (it keeps a 16 MB capture alive and can receive stray events)
+            self.snipper.deleteLater()
         self.snipper = None
 
     def _pin_from_snip(self, pixmap, global_topleft, display_scale=1.0):
