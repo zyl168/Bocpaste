@@ -38,8 +38,11 @@ class Paster(QWidget):
             self._movie.jumpToFrame(0)
 
         # visual transform state; display_scale maps physical image pixels to
-        # logical screen units so a pinned capture keeps its on-screen size
-        self._scale = 1.0 / max(0.01, float(display_scale)) if display_scale else 1.0
+        # logical screen units so a pinned capture keeps its on-screen size.
+        # _sx/_sy allow independent axis scaling (edge-stretch resize).
+        _s = 1.0 / max(0.01, float(display_scale)) if display_scale else 1.0
+        self._sx = _s
+        self._sy = _s
         self._display_scale = float(display_scale) if display_scale else 1.0
         self._rotation = 0          # 0/90/180/270
         self._flip_h = False
@@ -51,6 +54,11 @@ class Paster(QWidget):
         self._dragging = False
         self._drag_anchor = QPoint()
         self._was_moved = False
+        self._resizing = ""         # "" | n/s/e/w/ne/nw/se/sw
+        self._rs_anchor = QPoint()
+        self._rs_orig_geo = QRect()
+        self._rs_orig_sx = 1.0
+        self._rs_orig_sy = 1.0
 
         self._shadow_m = 14 if config.get_bool(config.K.PASTE_SHADOW) else 0
         if self._shadow_m:
@@ -109,10 +117,10 @@ class Paster(QWidget):
 
     def _apply_window_size(self):
         m = self._shadow_m
-        w = max(1, int(round(self._display.width() * self._scale))) + 2 * m
-        h = max(1, int(round(self._display.height() * self._scale))) + 2 * m
+        w = max(1, int(round(self._display.width() * self._sx))) + 2 * m
+        h = max(1, int(round(self._display.height() * self._sy))) + 2 * m
         # keep top-left anchored while resizing
-        tl = self.pos() if not self.isVisible() else self.pos()
+        tl = self.pos()
         self.resize(w, h)
         if self.isVisible():
             self.move(tl)
@@ -155,25 +163,124 @@ class Paster(QWidget):
         p.end()
 
     # ------------------------------------------------------------------ #
-    # mouse: move / zoom / opacity / click-through
+    # mouse: move / edge-resize / zoom / opacity / click-through
     # ------------------------------------------------------------------ #
+    _RESIZE_M = 8            # px band inside the image edge
+    _MIN_CONTENT = 16        # smallest content size in px
+
+    _ZONE_CURSORS = {
+        "n": Qt.SizeVerCursor, "s": Qt.SizeVerCursor,
+        "e": Qt.SizeHorCursor, "w": Qt.SizeHorCursor,
+        "ne": Qt.SizeBDiagCursor, "sw": Qt.SizeBDiagCursor,
+        "nw": Qt.SizeFDiagCursor, "se": Qt.SizeFDiagCursor,
+    }
+
+    def _hit_resize_zone(self, pos: QPoint) -> str:
+        r = self._content_rect()
+        if not QRect(r.left() - 4, r.top() - 4,
+                     r.width() + 8, r.height() + 8).contains(pos):
+            return ""
+        west = abs(pos.x() - r.left()) <= self._RESIZE_M
+        east = abs(pos.x() - r.right()) <= self._RESIZE_M
+        north = abs(pos.y() - r.top()) <= self._RESIZE_M
+        south = abs(pos.y() - r.bottom()) <= self._RESIZE_M
+        v = "n" if north else "s" if south else ""
+        h = "w" if west else "e" if east else ""
+        return v + h
+
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
+        if e.button() != Qt.LeftButton:
+            return
+        pos = e.pos()
+        zone = self._hit_resize_zone(pos)
+        if zone:
+            self._resizing = zone
+            self._rs_anchor = e.globalPosition().toPoint()
+            self._rs_orig_geo = self.geometry()
+            self._rs_orig_sx = self._sx
+            self._rs_orig_sy = self._sy
+        else:
             self._dragging = True
             self._was_moved = False
             self._drag_anchor = e.globalPosition().toPoint() - self.pos()
-            e.accept()
+        e.accept()
 
     def mouseMoveEvent(self, e):
-        if self._dragging:
-            self.move(e.globalPosition().toPoint() - self._drag_anchor)
+        g = e.globalPosition().toPoint()
+        if self._resizing:
+            self._apply_resize(g)
+        elif self._dragging:
+            self.move(g - self._drag_anchor)
             self._was_moved = True
+        else:
+            zone = self._hit_resize_zone(e.pos())
+            self.setCursor(self._ZONE_CURSORS.get(zone, Qt.ArrowCursor))
 
     def mouseReleaseEvent(self, e):
-        if e.button() == Qt.LeftButton and self._dragging:
+        if e.button() != Qt.LeftButton:
+            return
+        if self._resizing:
+            self._resizing = ""
+        elif self._dragging:
             self._dragging = False
             if self._was_moved and config.get_bool(config.K.PASTE_SNAP):
                 self._snap_to_edges()
+
+    def _apply_resize(self, g: QPoint):
+        """Corner zones scale proportionally; edge zones stretch one axis."""
+        zone = self._resizing
+        og = self._rs_orig_geo
+        m = self._shadow_m
+        min_w = self._MIN_CONTENT + 2 * m
+        min_h = self._MIN_CONTENT + 2 * m
+        dx = g.x() - self._rs_anchor.x()
+        dy = g.y() - self._rs_anchor.y()
+        rect = QRect(og)
+
+        if len(zone) == 2:
+            # proportional: factor from the axis with the larger relative move
+            base_w = max(1, og.width() - 2 * m)
+            base_h = max(1, og.height() - 2 * m)
+            fx = (og.width() + dx * (1 if "e" in zone else -1)) / og.width()
+            fy = (og.height() + dy * (1 if "s" in zone else -1)) / og.height()
+            f = max(0.05, max(fx, fy))
+            new_sx = self._rs_orig_sx * f
+            new_sy = self._rs_orig_sy * f
+            new_w = og.width() * f
+            new_h = og.height() * f
+            if "e" in zone:
+                rect.setWidth(int(round(new_w)))
+            else:
+                rect.setLeft(int(round(og.right() - new_w)))
+            if "s" in zone:
+                rect.setHeight(int(round(new_h)))
+            else:
+                rect.setTop(int(round(og.bottom() - new_h)))
+        else:
+            L, R, T, B = og.left(), og.right(), og.top(), og.bottom()
+            if "e" in zone:
+                R = max(L + min_w - 1, R + dx)
+            if "w" in zone:
+                L = min(R - min_w + 1, L + dx)
+            if "s" in zone:
+                B = max(T + min_h - 1, B + dy)
+            if "n" in zone:
+                T = min(B - min_h + 1, T + dy)
+            rect = QRect(QPoint(L, T), QPoint(R, B))
+
+        # derive the new per-axis scales from the resulting content size
+        disp_w = max(1, self._display.width())
+        disp_h = max(1, self._display.height())
+        content_w = max(self._MIN_CONTENT, rect.width() - 2 * m)
+        content_h = max(self._MIN_CONTENT, rect.height() - 2 * m)
+        if len(zone) == 2:
+            self._sx = new_sx
+            self._sy = new_sy
+        else:
+            self._sx = content_w / disp_w
+            self._sy = content_h / disp_h
+        self.setGeometry(rect)
+        self.update()
 
     def mouseDoubleClickEvent(self, e):
         if e.button() == Qt.LeftButton:
@@ -193,25 +300,28 @@ class Paster(QWidget):
             return
         factor = (1.0 + step) if delta > 0 else (1.0 / (1.0 + step))
         self._zoom_around(self._image_point(e.position()),
-                          self._scale * factor)
+                          self._sx * factor, self._sy * factor)
 
     def _image_point(self, local_pos: QPointF) -> QPointF:
-        m = self._shadow_m
         cr = self._content_rect()
-        return QPointF((local_pos.x() - cr.left()) / self._scale,
-                       (local_pos.y() - cr.top()) / self._scale)
+        return QPointF((local_pos.x() - cr.left()) / self._sx,
+                       (local_pos.y() - cr.top()) / self._sy)
 
-    def _zoom_around(self, img_pt: QPointF, new_scale: float):
-        new_scale = max(_MIN_SCALE, min(_MAX_SCALE, new_scale))
-        if abs(new_scale - self._scale) < 1e-6:
+    def _zoom_around(self, img_pt: QPointF, new_sx: float, new_sy: float | None = None):
+        """Zoom to an absolute per-axis scale, keeping img_pt under the cursor."""
+        if new_sy is None:
+            new_sy = new_sx
+        new_sx = max(_MIN_SCALE, min(_MAX_SCALE, new_sx))
+        new_sy = max(_MIN_SCALE, min(_MAX_SCALE, new_sy))
+        if abs(new_sx - self._sx) < 1e-6 and abs(new_sy - self._sy) < 1e-6:
             return
         mouse_global = QCursor.pos()
-        self._scale = new_scale
+        self._sx, self._sy = new_sx, new_sy
         m = self._shadow_m
         # resize then move so the image point stays under the cursor
         self._apply_window_size()
-        new_x = mouse_global.x() - int(round(img_pt.x() * new_scale)) - m
-        new_y = mouse_global.y() - int(round(img_pt.y() * new_scale)) - m
+        new_x = mouse_global.x() - int(round(img_pt.x() * new_sx)) - m
+        new_y = mouse_global.y() - int(round(img_pt.y() * new_sy)) - m
         self.move(new_x, new_y)
         self.update()
 
@@ -259,7 +369,9 @@ class Paster(QWidget):
         self._rebuild_display()
 
     def reset_transform(self):
-        self._scale = 1.0 / max(0.01, self._display_scale)
+        _s = 1.0 / max(0.01, self._display_scale)
+        self._sx = _s
+        self._sy = _s
         self._rotation = 0
         self._flip_h = self._flip_v = False
         self._rebuild_display()
